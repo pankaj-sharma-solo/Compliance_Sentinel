@@ -1,4 +1,6 @@
 from datetime import date
+
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sentinel.models.rule import Rule, RuleStatus
 from sentinel.dao.vector_store import (
@@ -64,27 +66,45 @@ def reconcile_version(db: Session, new_rule_text: str, new_rule_data: dict) -> d
         return {"action": "new"}
 
 
-def supersede_rule(db: Session, old_rule_id: str, new_rule: Rule) -> Rule:
+def supersede_rule(db: Session, old_rule_id: str, new_rule: Rule) -> Rule | None:
     """
     Insert new rule, mark old as DEPRECATED, set superseded_by FK, sync Qdrant.
+    FK-safe order: new rule inserted + flushed FIRST, then old rule updated.
     """
-    old = get_rule_by_id(db, old_rule_id)
-    if old:
-        old.status = RuleStatus.DEPRECATED
-        old.superseded_by = new_rule.rule_id
-        deprecate_rule_in_vector_store(old_rule_id)
+    try:
+        # ── Step 1: New rule in DB first ──────────────────────────────────────
+        db.add(new_rule)
+        db.flush()
 
-    db.add(new_rule)
-    db.commit()
-    db.refresh(new_rule)
-    upsert_rule(
-        rule_id=new_rule.rule_id,
-        rule_text=new_rule.rule_text,
-        metadata={
-            "source_doc": new_rule.source_doc,
-            "status": new_rule.status.value,
-            "obligation_type": new_rule.obligation_type.value,
-            "severity": _extract_max_severity(new_rule.violation_conditions),
-        },
-    )
-    return new_rule
+        # ── Step 2: Now safe to point old rule at new rule_id ─────────────────
+        old = get_rule_by_id(db, old_rule_id)
+        if old:
+            old.status = RuleStatus.DEPRECATED
+            old.superseded_by = new_rule.rule_id
+            db.flush()
+            deprecate_rule_in_vector_store(old_rule_id)
+
+        # ── Step 3: Commit both changes atomically ────────────────────────────
+        db.commit()
+        db.refresh(new_rule)
+
+        # ── Step 4: Sync new rule to Qdrant ───────────────────────────────────
+        upsert_rule(
+            rule_id=new_rule.rule_id,
+            rule_text=new_rule.rule_text,
+            metadata={
+                "source_doc": new_rule.source_doc,
+                "article_ref": getattr(new_rule, "article_ref", ""),
+                "status": new_rule.status.value,
+                "obligation_type": new_rule.obligation_type.value,
+                "severity": _extract_max_severity(new_rule.violation_conditions),
+            },
+        )
+        logger.info("Superseded '%s' → '%s'", old_rule_id, new_rule.rule_id)
+        return new_rule
+
+    except IntegrityError as e:
+        db.rollback()
+        logger.error("supersede_rule failed for '%s': %s", new_rule.rule_id, e)
+        return None
+

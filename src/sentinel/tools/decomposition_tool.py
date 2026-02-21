@@ -7,6 +7,8 @@ Uses include_raw=True for validation-feedback retry:
 the LLM gets its own parse error fed back as context
 rather than blind retrying.
 """
+from pathlib import Path
+
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
@@ -17,6 +19,7 @@ from sentinel.states.state import DecomposedRule, ViolationCondition
 from sentinel.config import settings
 import logging
 import json
+import hashlib
 
 
 logger = logging.getLogger(__name__)
@@ -39,6 +42,12 @@ _DECOMPOSE_PROMPT = ChatPromptTemplate.from_messages([
      "Rule ID: {rule_id}\nSource: {source_doc}\nArticle: {article_ref}\n\nRULE TEXT:\n{rule_text}"),
 ])
 
+def _make_rule_id(source_doc: str, article_ref: str, span_text: str) -> str:
+    prefix = Path(source_doc).stem.upper().replace(" ", "-")
+    raw = f"{source_doc}::{article_ref}::{span_text.strip().lower()}"
+    hash_suffix = hashlib.md5(raw.encode()).hexdigest()[:8]
+    return f"{prefix}-{article_ref.replace(' ', '')}-{hash_suffix}"
+
 
 def _decompose_with_retry(span: dict, max_retries: int = 3) -> DecomposedRule | None:
     """
@@ -47,7 +56,11 @@ def _decompose_with_retry(span: dict, max_retries: int = 3) -> DecomposedRule | 
     (not a blind retry) — the model self-corrects.
     """
     structured_model = _strong_llm.with_structured_output(DecomposedRule, include_raw=True)
-    rule_id = f"{span['source_doc'].replace('.pdf','').upper()}-{span.get('article_ref','X').replace(' ','')}".replace(" ", "-")
+    rule_id = _make_rule_id(
+        span["source_doc"],
+        span.get("article_ref", "X"),
+        span["span_text"],
+    )
 
     last_error = None
     for attempt in range(max_retries):

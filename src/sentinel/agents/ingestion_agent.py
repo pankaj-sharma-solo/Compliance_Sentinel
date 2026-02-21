@@ -10,7 +10,7 @@ from sentinel.states.state import IngestionState, DecomposedRule
 from sentinel.tools.extraction_tools import pass1_extract_candidates, pass2_extract_structured_spans
 from sentinel.tools.decomposition_tool import decompose_rule_span
 from sentinel.models.rule import Rule, RuleStatus, ObligationType
-from sentinel.dao.rule_dao import insert_rule, reconcile_version, supersede_rule
+from sentinel.dao.rule_dao import insert_rule, reconcile_version, supersede_rule, get_rule_by_id
 from sentinel.models.audit_log import AuditLog
 from sentinel.config import settings
 from datetime import date
@@ -76,6 +76,10 @@ def node_persist_rules(state: IngestionState, db: Session) -> dict:
 
     for rule_data in state.get("decomposed_rules", []):
         try:
+            if get_rule_by_id(db, rule_data.rule_id):
+                logger.info("Rule '%s' already exists — skipping", rule_data.rule_id)
+                continue
+
             reconcile = reconcile_version(db, rule_data.rule_text, rule_data.model_dump())
             action = reconcile["action"]
 
@@ -87,7 +91,7 @@ def node_persist_rules(state: IngestionState, db: Session) -> dict:
                 version=1,
                 status=RuleStatus.DRAFT if action == "human_review" else RuleStatus.ACTIVE,
                 effective_date=date.today(),
-                obligation_type=ObligationType[rule_data.obligation_type],
+                obligation_type=ObligationType(rule_data.obligation_type),
                 data_subject_scope=rule_data.data_subject_scope,
                 violation_conditions=[vc.model_dump() for vc in rule_data.violation_conditions],
             )

@@ -10,7 +10,7 @@ class Settings(BaseSettings):
 
     # Qdrant
     qdrant_url: str = Field("http://localhost:6333", alias="QDRANT_URL")
-    qdrant_collection: str = Field("compliance_rules", alias="QDRANT_COLLECTION")
+    qdrant_collection: str = Field("compliance-sentinel", alias="QDRANT_COLLECTION")
 
     # LLM
     openai_api_key: str | None = Field(None, alias="OPENAI_API_KEY")
