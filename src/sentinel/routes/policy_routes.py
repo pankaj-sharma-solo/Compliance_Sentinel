@@ -50,7 +50,7 @@ async def upload_policy_pdf(
     pdf_path = os.path.join(UPLOAD_DIR, f"{job_id}_{file.filename}")
 
     with open(pdf_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+        shutil.copyfileobj(file.file, f) # type: ignore[arg-type]
 
     background_tasks.add_task(_run_ingestion, pdf_path, file.filename, db)
     return {"job_id": job_id, "status": "ingestion_queued", "filename": file.filename}
@@ -58,7 +58,7 @@ async def upload_policy_pdf(
 
 @router.get("/rules")
 def list_rules(status: str = "ACTIVE", db: Session = Depends(get_db)):
-    rules = db.query(Rule).filter(Rule.status == status).all()
+    rules = db.query(Rule).filter_by(status = status).all()
     return [
         {
             "rule_id": r.rule_id,
@@ -75,7 +75,7 @@ def list_rules(status: str = "ACTIVE", db: Session = Depends(get_db)):
 
 @router.get("/rules/{rule_id}")
 def get_rule(rule_id: str, db: Session = Depends(get_db)):
-    rule = db.query(Rule).filter(Rule.rule_id == rule_id).first()
+    rule = db.query(Rule).filter_by(rule_id = rule_id).first()
     if not rule:
         raise HTTPException(status_code=404, detail="Rule not found")
     return {
@@ -95,7 +95,7 @@ def get_rule(rule_id: str, db: Session = Depends(get_db)):
 @router.patch("/rules/{rule_id}/approve")
 def approve_draft_rule(rule_id: str, actor: str = "system", db: Session = Depends(get_db)):
     """Approve a DRAFT rule (from human review queue) → set to ACTIVE."""
-    rule = db.query(Rule).filter(Rule.rule_id == rule_id).first()
+    rule = db.query(Rule).filter_by(rule_id = rule_id).first()
     if not rule:
         raise HTTPException(status_code=404, detail="Rule not found")
     if rule.status != RuleStatus.DRAFT:

@@ -11,13 +11,13 @@ import re
 import logging
 from typing import Any
 from sqlalchemy import text, create_engine
-from langchain_openai import ChatOpenAI
+from langchain_google_genai.chat_models import ChatGoogleGenerativeAI
 from langchain_core.tools import tool
 from sentinel.config import settings
 
 logger = logging.getLogger(__name__)
 
-_fallback_llm = ChatOpenAI(model=settings.cheap_model, temperature=0.0, api_key=settings.openai_api_key)
+_fallback_llm = ChatGoogleGenerativeAI(model=settings.cheap_model, temperature=0.0, google_api_key=settings.google_api_key)
 
 EU_REGIONS = {
     "eu-west-1", "eu-west-2", "eu-west-3", "eu-central-1",

@@ -3,14 +3,13 @@ from pydantic import Field
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore", populate_by_name=True,)
 
     # Database
     mysql_url: str = Field(..., alias="MYSQL_URL")  # e.g. mysql+pymysql://user:pass@host/dbname
 
     # Qdrant
     qdrant_url: str = Field("http://localhost:6333", alias="QDRANT_URL")
-    qdrant_api_key: str | None = Field(None, alias="QDRANT_API_KEY")
     qdrant_collection: str = Field("compliance_rules", alias="QDRANT_COLLECTION")
 
     # LLM
@@ -18,8 +17,8 @@ class Settings(BaseSettings):
     google_api_key: str | None = Field(None, alias="GOOGLE_API_KEY")
 
     # Models — two-pass cost control
-    cheap_model: str = Field("gpt-4o-mini", alias="CHEAP_MODEL")       # Pass-1: candidate extraction
-    strong_model: str = Field("gpt-4o", alias="STRONG_MODEL")          # Pass-2: structured decomposition
+    cheap_model: str = Field("gemini-2.5-flash", alias="CHEAP_MODEL")       # Pass-1: candidate extraction
+    strong_model: str = Field("gemini-2.5-pro", alias="STRONG_MODEL")          # Pass-2: structured decomposition
 
     # Similarity thresholds for version reconciliation
     similarity_high: float = Field(0.92, alias="SIMILARITY_HIGH")       # Same rule, reworded → human review

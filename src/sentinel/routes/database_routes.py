@@ -98,7 +98,7 @@ def register_database(
         connection_string_enc=req.connection_string,  # TODO: encrypt with Fernet before storing
         db_type=req.db_type,
         server_region=req.server_region,
-        scan_mode=ScanMode[req.scan_mode],
+        scan_mode=ScanMode(req.scan_mode),
         cron_expression=req.cron_expression,
         owner_user_id=req.owner_user_id,
     )
@@ -146,7 +146,7 @@ def trigger_manual_scan(
     db: Session = Depends(get_db),
 ):
     """Manually trigger a compliance scan for a registered DB."""
-    conn = db.query(DatabaseConnection).filter(DatabaseConnection.id == db_id).first()
+    conn: DatabaseConnection | None = db.query(DatabaseConnection).filter_by(id = db_id).first()
     if not conn:
         raise HTTPException(status_code=404, detail="DB connection not found")
     if not conn.schema_map:
@@ -167,7 +167,7 @@ def receive_cdc_event(
     Triggers enforcement scan for the changed table only.
     For high-risk DBs where real-time detection is required.
     """
-    conn = db.query(DatabaseConnection).filter(DatabaseConnection.id == db_id).first()
+    conn: DatabaseConnection | None = db.query(DatabaseConnection).filter_by(id = db_id).first()
     if not conn:
         raise HTTPException(status_code=404, detail="DB connection not found")
     if conn.scan_mode != ScanMode.CDC:

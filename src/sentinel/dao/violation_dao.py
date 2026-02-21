@@ -36,16 +36,16 @@ def persist_violation(db: Session, violation_data: dict, checkpoint_id: str | No
 def get_violations_by_connection(
     db: Session, db_connection_id: int, status: ViolationStatus | None = None
 ) -> list[Violation]:
-    q = db.query(Violation).filter(Violation.db_connection_id == db_connection_id)
+    q = db.query(Violation).filter_by(db_connection_id = db_connection_id)
     if status:
-        q = q.filter(Violation.status == status)
+        q = q.filter_by(status = status)
     return q.order_by(desc(Violation.detected_at)).all()
 
 
 def get_open_violations(db: Session, limit: int = 100) -> list[Violation]:
     return (
         db.query(Violation)
-        .filter(Violation.status == ViolationStatus.OPEN)
+        .filter_by(status = ViolationStatus.OPEN)
         .order_by(desc(Violation.detected_at))
         .limit(limit)
         .all()
@@ -56,7 +56,7 @@ def resolve_violation(
     db: Session, violation_id: int, new_status: ViolationStatus, resolved_by: str
 ) -> Violation | None:
     from datetime import datetime
-    v = db.query(Violation).filter(Violation.id == violation_id).first()
+    v = db.query(Violation).filter_by(id = violation_id).first()
     if not v:
         return None
     v.status = new_status
@@ -78,5 +78,5 @@ def resolve_violation(
 def get_audit_logs(db: Session, entity_id: str | None = None, limit: int = 200) -> list[AuditLog]:
     q = db.query(AuditLog)
     if entity_id:
-        q = q.filter(AuditLog.entity_id == entity_id)
+        q = q.filter_by(entity_id = entity_id)
     return q.order_by(desc(AuditLog.created_at)).limit(limit).all()

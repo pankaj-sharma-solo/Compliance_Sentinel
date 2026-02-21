@@ -23,7 +23,7 @@ def _scheduled_scan_job(db_connection_id: int):
     """Job executed by APScheduler at cron time — mirrors the ambient agent pattern from reference codebase."""
     db: Session = SessionLocal()
     try:
-        conn = db.query(DatabaseConnection).filter(DatabaseConnection.id == db_connection_id).first()
+        conn: DatabaseConnection | None = db.query(DatabaseConnection).filter_by(id = db_connection_id).first()
         if conn and conn.schema_map:
             logger.info("[Scheduler] Triggering scan for DB connection %s", db_connection_id)
             _run_scan(conn, db)
@@ -39,8 +39,8 @@ def _load_scheduled_connections():
     """On startup, register APScheduler jobs for all SCHEDULED DB connections."""
     db: Session = SessionLocal()
     try:
-        connections = db.query(DatabaseConnection).filter(
-            DatabaseConnection.scan_mode == ScanMode.SCHEDULED
+        connections = db.query(DatabaseConnection).filter_by(
+            scan_mode = ScanMode.SCHEDULED
         ).all()
         for conn in connections:
             cron = conn.cron_expression or settings.default_scan_cron
@@ -99,4 +99,4 @@ def health():
 
 def start():
     """Entry point for poetry run start"""
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=8000)

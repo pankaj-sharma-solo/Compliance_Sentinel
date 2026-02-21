@@ -11,11 +11,11 @@ logger = logging.getLogger(__name__)
 
 
 def get_rule_by_id(db: Session, rule_id: str) -> Rule | None:
-    return db.query(Rule).filter(Rule.rule_id == rule_id).first()
+    return db.query(Rule).filter_by(rule_id = rule_id).first()
 
 
 def get_active_rules(db: Session) -> list[Rule]:
-    return db.query(Rule).filter(Rule.status == RuleStatus.ACTIVE).all()
+    return db.query(Rule).filter_by(status = RuleStatus.ACTIVE).all()
 
 
 def insert_rule(db: Session, rule: Rule) -> Rule:

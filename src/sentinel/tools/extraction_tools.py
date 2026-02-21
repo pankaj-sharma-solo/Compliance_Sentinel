@@ -5,7 +5,7 @@ Pass 2 — strong model: structured JSON output on candidate spans only.
 Saves 60–70% tokens vs feeding full PDF to the strong model.
 """
 import pdfplumber
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.tools import tool
 from sentinel.config import settings
 import logging
@@ -13,8 +13,8 @@ import re
 
 logger = logging.getLogger(__name__)
 
-_cheap_llm = ChatOpenAI(model=settings.cheap_model, temperature=0.0, api_key=settings.openai_api_key)
-_strong_llm = ChatOpenAI(model=settings.strong_model, temperature=0.0, api_key=settings.openai_api_key)
+_cheap_llm = ChatGoogleGenerativeAI(model=settings.cheap_model, temperature=0.0, google_api_key=settings.google_api_key)
+_strong_llm = ChatGoogleGenerativeAI(model=settings.strong_model, temperature=0.0, google_api_key=settings.google_api_key)
 
 SECTION_HEADER_RE = re.compile(
     r"^(Article\s+\d+|Section\s+\d+|§\s*\d+|Chapter\s+\d+|\d+\.\d+)",

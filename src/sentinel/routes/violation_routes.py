@@ -29,7 +29,7 @@ def list_violations(
     db: Session = Depends(get_db),
 ):
     if db_connection_id:
-        s = ViolationStatus[status] if status else None
+        s = ViolationStatus(status) if status else None
         violations = get_violations_by_connection(db, db_connection_id, s)
     else:
         violations = get_open_violations(db)
@@ -53,7 +53,7 @@ def list_violations(
 
 @router.get("/violations/{violation_id}")
 def get_violation(violation_id: int, db: Session = Depends(get_db)):
-    v = db.query(Violation).filter(Violation.id == violation_id).first()
+    v = db.query(Violation).filter_by(id = violation_id).first()
     if not v:
         raise HTTPException(status_code=404, detail="Violation not found")
     return {
@@ -80,7 +80,7 @@ def resolve_violation_endpoint(
     db: Session = Depends(get_db),
 ):
     try:
-        status = ViolationStatus[req.new_status]
+        status = ViolationStatus(req.new_status)
     except KeyError:
         raise HTTPException(status_code=400, detail=f"Invalid status: {req.new_status}")
 

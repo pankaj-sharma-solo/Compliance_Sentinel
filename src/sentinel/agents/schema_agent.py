@@ -4,7 +4,7 @@ Classifies every column in the registered DB into compliance categories.
 LLM cost paid ONCE. Output stored in database_connections.schema_map.
 """
 from langgraph.graph import StateGraph, START, END
-from langchain_openai import ChatOpenAI
+from langchain_google_genai.chat_models import ChatGoogleGenerativeAI
 from sqlalchemy import text, create_engine
 from sentinel.states.state import SchemaMappingState, SchemaColumnClassification, SchemaMap
 from sentinel.config import settings
@@ -13,7 +13,7 @@ import json
 
 logger = logging.getLogger(__name__)
 
-_llm = ChatOpenAI(model=settings.strong_model, temperature=0.0, api_key=settings.openai_api_key)
+_llm = ChatGoogleGenerativeAI(model=settings.strong_model, temperature=0.0, google_api_key=settings.google_api_key)
 
 
 def node_fetch_schema_info(state: SchemaMappingState) -> dict:

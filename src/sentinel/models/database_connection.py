@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, String, Integer, Enum, DateTime, JSON, func
+from sqlalchemy import Column, String, Integer, Enum, DateTime, JSON, func, Text
 from sentinel.database import Base
 import enum
 

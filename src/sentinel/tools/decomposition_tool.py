@@ -7,18 +7,21 @@ Uses include_raw=True for validation-feedback retry:
 the LLM gets its own parse error fed back as context
 rather than blind retrying.
 """
+from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_google_genai.chat_models import ChatGoogleGenerativeAI
 from sentinel.states.state import DecomposedRule, ViolationCondition
 from sentinel.config import settings
 import logging
 import json
 
+
 logger = logging.getLogger(__name__)
 
-_strong_llm = ChatOpenAI(model=settings.strong_model, temperature=0.0, api_key=settings.openai_api_key)
+_strong_llm = ChatGoogleGenerativeAI(model=settings.strong_model, temperature=0.0, google_api_key=settings.google_api_key)
 
 _parser = PydanticOutputParser(pydantic_object=DecomposedRule)
 
@@ -58,7 +61,7 @@ def _decompose_with_retry(span: dict, max_retries: int = 3) -> DecomposedRule | 
             )
             if last_error and attempt > 0:
                 messages.append(
-                    ("human", f"Your previous output failed validation: {last_error}. Please fix and return valid JSON.")
+                    HumanMessage(content=f"Your previous output failed validation: {last_error}. Please fix and return valid JSON.")
                 )
             result = structured_model.invoke(messages)
             if result["parsed"]:
