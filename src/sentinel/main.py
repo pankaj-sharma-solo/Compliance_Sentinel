@@ -10,7 +10,10 @@ from sentinel.config import settings
 from sentinel.routes.policy_routes import router as policy_router
 from sentinel.routes.database_routes import router as db_router, _run_scan
 from sentinel.routes.violation_routes import router as violation_router
+from sentinel.routes.scan_routes import router as scan_router
+from sentinel.routes.connection_routes import router as connection_router
 from sentinel.models.database_connection import ScanMode
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 logging.basicConfig(level=logging.INFO)
@@ -87,10 +90,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(policy_router)
 app.include_router(db_router)
 app.include_router(violation_router)
-
+app.include_router(scan_router)
+app.include_router(connection_router)
 
 @app.get("/health")
 def health():
