@@ -19,30 +19,60 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+from sentinel.tools.extraction_tools import (
+    pass1_extract_candidates_async,
+    pass2_extract_structured_spans_async,
+)
 
-def node_extract_candidates(state: IngestionState) -> dict:
-    """Pass-1: cheap model chunks PDF and identifies rule candidate sections."""
+async def node_extract_candidates(state: IngestionState) -> dict:
+    """Pass-1: parallel cheap-model calls to identify rule candidate sections."""
     try:
-        candidates = pass1_extract_candidates.invoke({"pdf_path": state["pdf_path"]})
+        candidates = await pass1_extract_candidates_async(state["pdf_path"])
         return {"raw_chunks": candidates, "candidate_spans": []}
     except Exception as e:
         logger.error("Pass-1 extraction failed: %s", e)
         return {"errors": state.get("errors", []) + [f"Pass-1 failed: {e}"]}
 
 
-def node_extract_spans(state: IngestionState) -> dict:
-    """Pass-2: strong model extracts structured rule spans from candidate chunks only."""
+async def node_extract_spans(state: IngestionState) -> dict:
+    """Pass-2: parallel strong-model calls to extract structured rule spans."""
     if not state.get("raw_chunks"):
         return {"errors": state.get("errors", []) + ["No candidate chunks from Pass-1"]}
     try:
-        spans = pass2_extract_structured_spans.invoke({
-            "candidates": state["raw_chunks"],
-            "source_doc": state["source_doc"],
-        })
+        spans = await pass2_extract_structured_spans_async(
+            candidates=state["raw_chunks"],
+            source_doc=state["source_doc"],
+        )
         return {"candidate_spans": spans}
     except Exception as e:
         logger.error("Pass-2 extraction failed: %s", e)
         return {"errors": state.get("errors", []) + [f"Pass-2 failed: {e}"]}
+
+
+
+# def node_extract_candidates(state: IngestionState) -> dict:
+#     """Pass-1: cheap model chunks PDF and identifies rule candidate sections."""
+#     try:
+#         candidates = pass1_extract_candidates.invoke({"pdf_path": state["pdf_path"]})
+#         return {"raw_chunks": candidates, "candidate_spans": []}
+#     except Exception as e:
+#         logger.error("Pass-1 extraction failed: %s", e)
+#         return {"errors": state.get("errors", []) + [f"Pass-1 failed: {e}"]}
+#
+#
+# def node_extract_spans(state: IngestionState) -> dict:
+#     """Pass-2: strong model extracts structured rule spans from candidate chunks only."""
+#     if not state.get("raw_chunks"):
+#         return {"errors": state.get("errors", []) + ["No candidate chunks from Pass-1"]}
+#     try:
+#         spans = pass2_extract_structured_spans.invoke({
+#             "candidates": state["raw_chunks"],
+#             "source_doc": state["source_doc"],
+#         })
+#         return {"candidate_spans": spans}
+#     except Exception as e:
+#         logger.error("Pass-2 extraction failed: %s", e)
+#         return {"errors": state.get("errors", []) + [f"Pass-2 failed: {e}"]}
 
 
 # def node_decompose_rules(state: IngestionState) -> dict:

@@ -5,6 +5,7 @@ Pass 2 — strong model: with_structured_output on candidates only.
 Saves 60–70% tokens vs feeding full PDF to the strong model.
 """
 import re
+import asyncio
 import logging
 import pdfplumber
 from pydantic import BaseModel, Field
@@ -191,3 +192,112 @@ def pass2_extract_structured_spans(candidates: list[dict], source_doc: str) -> l
 
     logger.info("Pass-2 total: %d rule spans extracted from %d candidates", len(spans), len(candidates))
     return spans
+
+# ── Async Pass-1 ──────────────────────────────────────────────────────────────
+
+async def _check_candidate_async(chunk: dict, semaphore: asyncio.Semaphore) -> dict | None:
+    """Check a single chunk asynchronously. Returns chunk with flag, or None if skipped."""
+    header_lower = chunk["section_header"].lower()
+    skip_keywords = ["audit", "retention", "definition", "preamble", "scope",
+                     "false positive", "remediation action", "glossary", "introduction"]
+    if any(kw in header_lower for kw in skip_keywords):
+        logger.debug("Pass-1: skipping non-rule section '%s'", chunk["section_header"])
+        return None
+
+    prompt = (
+        "You are a compliance analyst. Does the following text contain a regulatory obligation, "
+        "prohibition, or permission that could be decomposed into machine-checkable violation conditions? "
+        "Reply with exactly 'YES' or 'NO'. Do not explain.\n\n"
+        "TEXT:\n" + chunk["text"][:1500]
+    )
+    async with semaphore:
+        response = await _cheap_llm.ainvoke(prompt)
+
+    is_candidate = response.content.strip().upper().startswith("Y")
+    chunk["is_rule_candidate"] = is_candidate
+    return chunk if is_candidate else None
+
+
+async def pass1_extract_candidates_async(pdf_path: str) -> list[dict]:
+    """
+    Async Pass-1 — parallel cheap-model calls across all chunks.
+    PDF chunking is still sequential (single file read), LLM calls are fanned out.
+    """
+    chunks = _chunk_pdf_by_section(pdf_path)   # pure Python, no async needed
+    semaphore = asyncio.Semaphore(10)           # cheap model — higher concurrency OK
+
+    results = await asyncio.gather(
+        *[_check_candidate_async(chunk, semaphore) for chunk in chunks],
+        return_exceptions=True,
+    )
+
+    candidates = []
+    for item in results:
+        if isinstance(item, Exception):
+            logger.error("Pass-1 chunk check failed: %s", item)
+        elif item is not None:
+            candidates.append(item)
+
+    logger.info("Pass-1: %d/%d chunks are rule candidates", len(candidates), len(chunks))
+    return candidates
+
+
+# ── Async Pass-2 ──────────────────────────────────────────────────────────────
+
+async def _extract_spans_from_chunk_async(
+    chunk: dict, source_doc: str, semaphore: asyncio.Semaphore
+) -> list[dict]:
+    """Extract spans from a single candidate chunk asynchronously."""
+    try:
+        async with semaphore:
+            result: ExtractedSpans = await _structured_llm.ainvoke(
+                _PASS2_PROMPT.format_messages(
+                    source_doc=source_doc,
+                    section_header=chunk["section_header"],
+                    text=chunk["text"][:3000],
+                )
+            )
+
+        if not result.spans:
+            logger.debug("Pass-2: no enforceable rules in '%s'", chunk["section_header"])
+            return []
+
+        logger.info("Pass-2: extracted %d rules from '%s'", len(result.spans), chunk["section_header"])
+        return [
+            {
+                **span.model_dump(),
+                "section_header": chunk["section_header"],
+                "page": chunk["page"],
+                "source_doc": source_doc,
+            }
+            for span in result.spans
+        ]
+
+    except Exception as e:
+        logger.error("Pass-2 failed for section '%s': %s", chunk["section_header"], e)
+        return []
+
+
+async def pass2_extract_structured_spans_async(
+    candidates: list[dict], source_doc: str
+) -> list[dict]:
+    """
+    Async Pass-2 — parallel strong-model calls across all candidate chunks.
+    """
+    semaphore = asyncio.Semaphore(5)   # strong model — lower concurrency, higher quota cost
+
+    results = await asyncio.gather(
+        *[_extract_spans_from_chunk_async(chunk, source_doc, semaphore) for chunk in candidates],
+        return_exceptions=True,
+    )
+
+    spans = []
+    for item in results:
+        if isinstance(item, Exception):
+            logger.error("Pass-2 unexpected error: %s", item)
+        elif item:
+            spans.extend(item)   # flatten list-of-lists
+
+    logger.info("Pass-2 total: %d rule spans from %d candidates", len(spans), len(candidates))
+    return spans
+
