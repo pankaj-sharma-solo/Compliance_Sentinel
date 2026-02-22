@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from typing import Optional
 from sentinel.database import get_db
 from sentinel.models.database_connection import DatabaseConnection, ScanMode
+from sentinel.services.audit_service import log_event
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/connections", tags=["Connections"])
@@ -36,6 +37,7 @@ class ConnectionUpdate(BaseModel):
     scan_mode: Optional[ScanMode] = None
     cron_expression: Optional[str] = None
     server_region: Optional[str] = None
+    owner_user_id: Optional[str] = None
 
 
 # ── Serializer helper ─────────────────────────────────────────────────────────
@@ -78,6 +80,10 @@ def create_connection(body: ConnectionCreate, background_tasks: BackgroundTasks,
     db.commit()
     db.refresh(conn)
 
+    log_event(db, "CONNECTION_CREATED", "connection", str(conn.id),
+              actor=body.owner_user_id or "admin",
+              detail={"name": conn.name, "db_type": conn.db_type})
+
     background_tasks.add_task(_run_schema_mapping, conn.id, db)
     logger.info("Registered new DB connection: %s (id=%s)", conn.name, conn.id)
     return _serialize(conn)
@@ -91,6 +97,11 @@ def update_connection(connection_id: int, body: ConnectionUpdate, db: Session = 
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(conn, field, value)
     db.commit()
+
+    log_event(db, "CONNECTION_PATCHED", "connection", str(conn.id),
+              actor=body.owner_user_id or "admin",
+              detail={"name": conn.name, "db_type": conn.db_type})
+
     return _serialize(conn)
 
 
@@ -102,6 +113,73 @@ def delete_connection(connection_id: int, db: Session = Depends(get_db)):
     db.delete(conn)
     db.commit()
 
+    log_event(db, "CONNECTION_DELETED", "connection", str(conn.id),
+              actor="admin",
+              detail={"name": conn.name, "db_type": conn.db_type})
+
+
+@router.get("/{connection_id}/triggers")
+def get_triggers(connection_id: int, db: Session = Depends(get_db)):
+    conn = db.query(DatabaseConnection).filter_by(id=connection_id).first()
+    if not conn:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    try:
+        from sqlalchemy import create_engine, text as sa_text
+        engine = create_engine(conn.connection_string_enc, pool_pre_ping=True)
+        with engine.connect() as target_db:
+            rows = target_db.execute(sa_text("""
+                SELECT
+                    TRIGGER_NAME,
+                    EVENT_OBJECT_TABLE,
+                    ACTION_TIMING,
+                    EVENT_MANIPULATION,
+                    ACTION_STATEMENT
+                FROM information_schema.TRIGGERS
+                WHERE TRIGGER_SCHEMA = DATABASE()
+                ORDER BY EVENT_OBJECT_TABLE, ACTION_TIMING
+            """)).fetchall()
+        return [
+            {
+                "trigger_name": r[0],
+                "table_name"  : r[1],
+                "timing"      : r[2],
+                "event"       : r[3],
+                "statement"   : r[4][:120] + "..." if len(r[4]) > 120 else r[4],
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        logger.error("Trigger fetch failed for connection %s: %s", connection_id, e)
+        raise HTTPException(status_code=500, detail=f"Could not fetch triggers: {e}")
+
+
+@router.get("/{connection_id}/schema-map")
+def get_schema_map(connection_id: int, db: Session = Depends(get_db)):
+    conn = db.query(DatabaseConnection).filter_by(id=connection_id).first()
+    if not conn:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    if not conn.schema_map:
+        return {"tables": []}
+
+    # Convert stored JSON → structured table/column list
+    tables = []
+    for table_name, columns in conn.schema_map.items():
+        tables.append({
+            "table_name": table_name,
+            "columns"   : [
+                {
+                    "column_name"        : col_name,
+                    "data_type"          : meta.get("data_type", "unknown"),
+                    "compliance_category": meta.get("compliance_category", "None"),
+                    "sensitivity"        : meta.get("sensitivity", "NONE"),
+                    "applicable_regulations": meta.get("applicable_regulations", []),
+                    "reason"             : meta.get("reason", ""),
+                }
+                for col_name, meta in columns.items()
+            ],
+        })
+    return {"tables": tables, "mapped_at": conn.updated_at.isoformat() if conn.updated_at else None}
+
 
 @router.post("/{connection_id}/map-schema", status_code=202)
 def trigger_schema_mapping(
@@ -112,6 +190,10 @@ def trigger_schema_mapping(
     conn = db.query(DatabaseConnection).filter_by(id=connection_id).first()
     if not conn:
         raise HTTPException(status_code=404, detail="Connection not found")
+
+    log_event(db, "SCHEMA_MAPPING_TRIGGERED", "connection", str(conn.id),
+              actor="admin",
+              detail={"name": conn.name, "db_type": conn.db_type})
 
     background_tasks.add_task(_run_schema_mapping, connection_id, db)
     return {"status": "schema_mapping_queued", "connection_id": connection_id}

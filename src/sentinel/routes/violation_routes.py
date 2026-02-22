@@ -5,6 +5,8 @@ GET  /violations/{id}        — violation detail
 PATCH /violations/{id}/resolve  — resolve/dismiss a violation
 GET  /audit-logs             — audit trail
 """
+import logging
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -13,8 +15,15 @@ from sentinel.models.violation import Violation, ViolationStatus
 from sentinel.dao.violation_dao import (
     get_violations_by_connection, get_open_violations, resolve_violation, get_audit_logs
 )
+from sentinel.services.audit_service import log_event
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Violations & Audit"])
+
+class StatusUpdateRequest(BaseModel):
+    status    : ViolationStatus
+    resolved_by: str | None = None
 
 
 class ResolveRequest(BaseModel):
@@ -110,3 +119,63 @@ def list_audit_logs(
         }
         for l in logs
     ]
+
+
+@router.patch("/{violation_id}/status")
+def update_violation_status(
+    violation_id: int,
+    body        : StatusUpdateRequest,
+    db          : Session = Depends(get_db),
+):
+    v = db.query(Violation).filter_by(id=violation_id).first()
+    if not v:
+        raise HTTPException(status_code=404, detail="Violation not found")
+
+    old_status = v.status
+    v.status   = body.status
+
+    # Set resolution metadata for terminal statuses
+    if body.status in (ViolationStatus.REMEDIATED, ViolationStatus.ACCEPTED_RISK, ViolationStatus.FALSE_POSITIVE):
+        v.resolved_at = datetime.utcnow()
+        v.resolved_by = body.resolved_by or "manual"
+    elif body.status == ViolationStatus.OPEN:
+        # Reopen — clear resolution fields
+        v.resolved_at = None
+        v.resolved_by = None
+
+    db.commit()
+
+    log_event(
+        db,
+        event_type  = "VIOLATION_STATUS_CHANGED",
+        entity_type = "violation",
+        entity_id   = str(violation_id),
+        actor       = body.resolved_by or "manual",
+        detail      = {
+            "from"   : old_status.value,
+            "to"     : body.status.value,
+            "rule_id": v.rule_id,
+            "table"  : v.table_name,
+        },
+    )
+
+    logger.info("Violation %s status: %s → %s", violation_id, old_status.value, body.status.value)
+    return _serialize(v)
+
+
+def _serialize(v: Violation) -> dict:
+    return {
+        "id"                   : v.id,
+        "db_connection_id"     : v.db_connection_id,
+        "rule_id"              : v.rule_id,
+        "table_name"           : v.table_name,
+        "column_name"          : v.column_name,
+        "severity"             : v.severity.value,
+        "status"               : v.status.value,
+        "condition_matched"    : v.condition_matched,
+        "evidence_snapshot"    : v.evidence_snapshot,
+        "remediation_template" : v.remediation_template,
+        "detected_at"          : v.detected_at.isoformat(),
+        "resolved_at"          : v.resolved_at.isoformat() if v.resolved_at else None,
+        "resolved_by"          : v.resolved_by,
+    }

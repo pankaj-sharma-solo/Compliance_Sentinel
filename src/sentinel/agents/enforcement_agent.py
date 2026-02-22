@@ -1,17 +1,11 @@
 """
 Enforcement / scanning agent — LangGraph StateGraph.
-Context-isolated per DB connection (Deep Agent pattern from reference codebase).
-Nodes: filter_relevant_tables → run_enforcement_checks → persist_violations
-
-Scan time is almost entirely programmatic — LLM is rare fallback only.
 """
 from langgraph.graph import StateGraph, START, END
 from sqlalchemy.orm import Session
 from sentinel.states.state import ScanState
-from sentinel.tools.enforcement_tools import (
-    check_schema_map_match, evaluate_condition_chain
-)
-from sentinel.dao.rule_dao import get_active_rules
+from sentinel.tools.enforcement_tools import check_schema_map_match, evaluate_condition_chain
+from sentinel.dao.rule_dao import get_rule_by_id
 from sentinel.dao.vector_store import retrieve_relevant_rules
 from sentinel.dao.violation_dao import persist_violation
 from sentinel.config import settings
@@ -23,23 +17,27 @@ logger = logging.getLogger(__name__)
 def node_filter_relevant_tables(state: ScanState) -> dict:
     """
     Pre-scan table filtering — matches schema_map against rule library via Qdrant.
-    Only tables with compliance relevance get deep-scanned.
-    Reduces O(n*m) to O(k*m) where k << n.
+    Returns: relevant_rules = list of {rule_id, score, _matched_table}
+    NOTE: Qdrant payload intentionally has NO violation_conditions.
+          Only rule_id + metadata is stored. Full rule is fetched from MySQL in next node.
     """
-    schema_map = state.get("schema_map", {})
+    schema_map    = state.get("schema_map", {})
     relevant_rules = []
 
     for table_name, columns in schema_map.items():
-        # Build schema context string for semantic search
-        col_summaries = ", ".join(
+        col_summaries  = ", ".join(
             f"{col}:{meta.get('compliance_category', 'Unknown')}"
             for col, meta in columns.items()
         )
         schema_context = f"Table: {table_name}. Columns: {col_summaries}"
-        rules = retrieve_relevant_rules(schema_context, top_k=settings.max_relevant_rules_per_table)
-        for r in rules:
-            r["_matched_table"] = table_name
-            relevant_rules.append(r)
+
+        hits = retrieve_relevant_rules(schema_context, top_k=settings.max_relevant_rules_per_table)
+        for hit in hits:
+            relevant_rules.append({
+                "rule_id"       : hit["rule_id"],
+                "score"         : hit["score"],
+                "_matched_table": table_name,
+            })
 
     logger.info(
         "DB %s: %d relevant rule matches across %d tables",
@@ -48,65 +46,96 @@ def node_filter_relevant_tables(state: ScanState) -> dict:
     return {"relevant_rules": relevant_rules}
 
 
-def node_run_enforcement_checks(state: ScanState) -> dict:
+def node_run_enforcement_checks(state: ScanState, db: Session) -> dict:
     """
-    Core enforcement loop — three-layer detection per (table, column, condition).
-    80–90% of checks are pure SQL/metadata. LLM fallback is rare.
+    Core enforcement loop.
+    Qdrant gives us rule_id + matched_table.
+    MySQL gives us the full Rule object including violation_conditions.
     """
-    schema_map = state.get("schema_map", {})
-    relevant_rules = state.get("relevant_rules", [])
+    schema_map        = state.get("schema_map", {})
+    relevant_rules    = state.get("relevant_rules", [])
     connection_string = state.get("connection_string", "")
-    server_region = state.get("server_region", "")
-    violations = []
-    errors = list(state.get("errors", []))
+    server_region     = state.get("server_region", "")
+    violations        = []
+    errors            = list(state.get("errors", []))
 
-    for rule_entry in relevant_rules:
-        table = rule_entry.get("_matched_table")
-        violation_conditions = rule_entry.get("violation_conditions", [])
+    # ── Bulk-fetch full Rule objects from MySQL ───────────────────────────────
+    # Deduplicate rule_ids first — same rule may match multiple tables
+    rule_ids_seen: set[str] = set()
+    rule_cache   : dict[str, object] = {}
 
-        if not isinstance(violation_conditions, list):
+    for entry in relevant_rules:
+        rid = entry["rule_id"]
+        if rid not in rule_ids_seen:
+            rule_ids_seen.add(rid)
+            rule_obj = get_rule_by_id(db, rid)
+            if rule_obj:
+                rule_cache[rid] = rule_obj
+            else:
+                logger.warning("Rule %s found in Qdrant but not in MySQL — skipping", rid)
+
+    logger.info("Fetched %d/%d rules from MySQL", len(rule_cache), len(rule_ids_seen))
+
+    # ── Enforcement loop ──────────────────────────────────────────────────────
+    for entry in relevant_rules:
+        rule_id = entry["rule_id"]
+        table   = entry["_matched_table"]
+
+        rule_obj = rule_cache.get(rule_id)
+        if not rule_obj:
+            continue
+
+        violation_conditions = rule_obj.violation_conditions  # JSON column → list[dict]
+        if not isinstance(violation_conditions, list) or not violation_conditions:
+            logger.debug("Rule %s has no violation_conditions — skipping", rule_id)
             continue
 
         for condition in violation_conditions:
-            condition["rule_id"] = rule_entry["rule_id"]
-            # Layer 1: find matching columns via schema map
+            # Stamp rule_id onto condition so downstream tools know the source
+            condition = {**condition, "rule_id": rule_id}
+
+            # Layer 1 — schema map match: find which columns in `table` apply
             match_result = check_schema_map_match.invoke({
                 "schema_map": schema_map,
-                "condition": condition,
+                "condition" : condition,
             })
+
+            logger.debug("Rule %s | table %s | matches: %s", rule_id, table, match_result)
+
             for match in match_result.get("matches", []):
                 col = match["column"]
                 try:
                     evidence = evaluate_condition_chain(
-                        connection_string=connection_string,
-                        server_region=server_region,
-                        schema_map=schema_map,
-                        condition=condition,
-                        table=match["table"],
-                        column=col,
+                        connection_string = connection_string,
+                        server_region     = server_region,
+                        schema_map        = schema_map,
+                        condition         = condition,
+                        table             = match["table"],
+                        column            = col,
                     )
                     if evidence:
                         evidence["db_connection_id"] = state["db_connection_id"]
                         violations.append(evidence)
                         logger.info(
-                            "Violation found: %s.%s → rule %s",
-                            match["table"], col, rule_entry["rule_id"]
+                            "Violation found: %s.%s → rule %s (score %.2f)",
+                            match["table"], col, rule_id, entry["score"]
                         )
                 except Exception as e:
-                    errors.append(f"Enforcement check error {table}.{col}: {e}")
+                    errors.append(f"Enforcement check error {table}.{col} rule {rule_id}: {e}")
+                    logger.error("Enforcement error %s.%s rule %s: %s", table, col, rule_id, e)
 
     return {"violations_found": violations, "errors": errors}
 
 
 def node_persist_violations(state: ScanState, db: Session) -> dict:
     """Persist all detected violations to MySQL and append audit records."""
-    persisted = []
-    errors = list(state.get("errors", []))
-    checkpoint_id = state.get("langgraph_checkpoint_id")
+    persisted  = []
+    errors     = list(state.get("errors", []))
+    checkpoint = state.get("langgraph_checkpoint_id")
 
     for v_data in state.get("violations_found", []):
         try:
-            v = persist_violation(db, v_data, checkpoint_id=checkpoint_id)
+            v = persist_violation(db, v_data, checkpoint_id=checkpoint)
             persisted.append(v.id)
         except Exception as e:
             logger.error("Failed to persist violation: %s", e)
@@ -117,20 +146,15 @@ def node_persist_violations(state: ScanState, db: Session) -> dict:
 
 
 def build_enforcement_graph(db: Session):
-    """
-    Build the enforcement StateGraph.
-    Context isolated per invocation — matches the _create_task_tool pattern:
-    state["messages"] = [task_description_only] before invoking.
-    """
     graph = StateGraph(ScanState)
 
     graph.add_node("filter_relevant_tables", node_filter_relevant_tables)
-    graph.add_node("run_enforcement_checks", node_run_enforcement_checks)
-    graph.add_node("persist_violations", lambda state: node_persist_violations(state, db))
+    graph.add_node("run_enforcement_checks",  lambda state: node_run_enforcement_checks(state, db))
+    graph.add_node("persist_violations",      lambda state: node_persist_violations(state, db))
 
     graph.add_edge(START, "filter_relevant_tables")
     graph.add_edge("filter_relevant_tables", "run_enforcement_checks")
-    graph.add_edge("run_enforcement_checks", "persist_violations")
-    graph.add_edge("persist_violations", END)
+    graph.add_edge("run_enforcement_checks",  "persist_violations")
+    graph.add_edge("persist_violations",      END)
 
     return graph.compile()

@@ -1,5 +1,7 @@
 from datetime import datetime
 from sqlalchemy import Column, String, Integer, Enum, DateTime, JSON, ForeignKey, Text, func
+from sqlalchemy.orm import relationship
+
 from sentinel.database import Base
 import enum
 
@@ -34,3 +36,4 @@ class Violation(Base):
     detected_at = Column(DateTime, server_default=func.now())
     resolved_at = Column(DateTime, nullable=True)
     resolved_by = Column(String(128), nullable=True)
+    db_connection = relationship("DatabaseConnection", foreign_keys=[db_connection_id])

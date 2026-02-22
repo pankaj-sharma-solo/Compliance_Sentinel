@@ -23,7 +23,7 @@ def persist_violation(db: Session, violation_data: dict, checkpoint_id: str | No
             "table_name": v.table_name,
             "column_name": v.column_name,
             "condition_matched": v.condition_matched,
-            "severity": v.severity.value if v.severity else None,
+            "severity": v.severity
         },
         langgraph_checkpoint_id=checkpoint_id,
     )

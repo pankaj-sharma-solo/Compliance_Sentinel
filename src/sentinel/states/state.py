@@ -62,6 +62,7 @@ class SchemaColumnClassification(BaseModel):
         description="PII_contact | PII_gov_id | Financial | Health | Geographic | Internal | None"
     )
     sensitivity: str = Field(..., description="HIGH | MEDIUM | LOW | NONE")
+    applicable_regulations: list[str] = []
     reason: str
 
 

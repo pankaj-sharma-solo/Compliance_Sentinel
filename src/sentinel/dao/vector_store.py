@@ -65,10 +65,10 @@ def retrieve_relevant_rules(schema_context: str, top_k: int = None, status_filte
     """
     k = top_k or settings.max_relevant_rules_per_table
     ensure_collection()
-    vector = get_embedder().embed(schema_context)
+    vector = list(get_embedder().embed(schema_context))[0].tolist()
     results = get_client().query_points(
         collection_name=settings.qdrant_collection,
-        query_vector=vector,
+        query=vector,
         limit=k,
         query_filter=Filter(
             must=[FieldCondition(key="status", match=MatchValue(value=status_filter))]

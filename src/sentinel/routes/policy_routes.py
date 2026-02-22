@@ -16,6 +16,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from sqlalchemy import func
+from sentinel.models.audit_log import AuditLog as AuditLogModel
 
 from sentinel.database import get_db
 from sentinel.models.rule import Rule, RuleStatus
@@ -281,3 +282,76 @@ def approve_draft_rule(
     db.commit()
 
     return {"rule_id": rule_id, "status": "ACTIVE"}
+
+
+# PATCH /policies/rules/{rule_id} — update rule text
+@router.patch("/rules/{rule_id}")
+def update_rule(rule_id: str, body: dict, db: Session = Depends(get_db)):
+    rule = db.query(Rule).filter_by(rule_id=rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    if "rule_text" in body:
+        rule.rule_text = body["rule_text"]
+    db.commit()
+    audit = AuditLog(event_type="RULE_UPDATED", entity_type="rule",
+                     entity_id=rule_id, actor="admin",
+                     detail={"field": "rule_text"})
+    db.add(audit); db.commit()
+    return {"rule_id": rule_id, "status": "updated"}
+
+
+# PATCH /policies/rules/{rule_id}/deprecate — mark as stale
+@router.patch("/rules/{rule_id}/deprecate")
+def deprecate_rule(rule_id: str, db: Session = Depends(get_db)):
+    rule = db.query(Rule).filter_by(rule_id=rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    rule.status = RuleStatus.DEPRECATED
+    audit = AuditLog(event_type="RULE_DEPRECATED", entity_type="rule",
+                     entity_id=rule_id, actor="admin",
+                     detail={"previous_status": rule.status.value})
+    db.add(audit); db.commit()
+    return {"rule_id": rule_id, "status": "DEPRECATED"}
+
+
+# GET /policies/audit-log — for the Audit Log tab
+@router.get("/audit-log")
+def get_audit_log(entity_type: str = "rule", limit: int = 50, db: Session = Depends(get_db)):
+    logs = (db.query(AuditLog)
+              .filter_by(entity_type=entity_type)
+              .order_by(AuditLog.created_at.desc())
+              .limit(limit).all())
+    return [
+        {"id": l.id, "timestamp": l.created_at.isoformat(),
+         "actor": l.actor, "event_type": l.event_type,
+         "entity_id": l.entity_id, "detail": l.detail}
+        for l in logs
+    ]
+
+
+@router.get("/audit-log")
+def get_audit_log(
+    entity_type: str | None = None,
+    event_type : str | None = None,
+    limit      : int        = 50,
+    db         : Session    = Depends(get_db),
+):
+    query = db.query(AuditLogModel).order_by(AuditLogModel.created_at.desc())
+    if entity_type:
+        query = query.filter_by(entity_type=entity_type)
+    if event_type:
+        query = query.filter_by(event_type=event_type)
+    logs = query.limit(limit).all()
+    return [
+        {
+            "id"         : l.id,
+            "timestamp"  : l.created_at.isoformat(),
+            "actor"      : l.actor,
+            "event_type" : l.event_type,
+            "entity_type": l.entity_type,
+            "entity_id"  : l.entity_id,
+            "detail"     : l.detail,
+        }
+        for l in logs
+    ]
+

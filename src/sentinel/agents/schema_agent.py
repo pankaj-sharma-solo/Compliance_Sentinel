@@ -18,9 +18,10 @@ logger = logging.getLogger(__name__)
 
 class ColumnClassificationItem(BaseModel):
     column_name         : str
-    compliance_category : str  # PII_contact | PII_gov_id | Financial | Health | Geographic | Internal | None
-    sensitivity         : str  # HIGH | MEDIUM | LOW | NONE
-    reason              : str
+    compliance_category : str   # PII_contact | PII_gov_id | Financial | Health | Geographic | Internal | None
+    sensitivity         : str   # HIGH | MEDIUM | LOW | NONE
+    applicable_regulations: list[str]  # e.g. ["GDPR Art.9", "PCI-DSS Req.3", "HIPAA §164.514"]
+    reason              : str          # WHY this regulation applies to this column specifically
 
 class TableClassificationOutput(BaseModel):
     classifications: List[ColumnClassificationItem]
@@ -48,15 +49,9 @@ def node_fetch_schema_info(state: SchemaMappingState) -> dict:
 
 
 def node_classify_columns(state: SchemaMappingState) -> dict:
-    """
-    LLM classifies each column into a compliance category.
-    Batched by table to reduce LLM calls.
-    Uses structured output — no JSON parsing, no json.loads risk.
-    """
     if not state.get("raw_schema_info"):
         return {"errors": ["No schema info to classify"]}
 
-    # ── Group columns by table ────────────────────────────────────────────
     tables: dict[str, list] = {}
     for row in state["raw_schema_info"]:
         tables.setdefault(row["TABLE_NAME"], []).append(row)
@@ -70,9 +65,21 @@ def node_classify_columns(state: SchemaMappingState) -> dict:
             for c in columns
         )
         prompt = (
-            f"Classify each column of table `{table_name}` into a compliance category.\n"
-            f"Categories: PII_contact | PII_gov_id | Financial | Health | Geographic | Internal | None\n"
-            f"Sensitivity: HIGH | MEDIUM | LOW | NONE\n\n"
+            f"You are a compliance classification expert. Analyze each column of table `{table_name}`.\n\n"
+
+            f"For each column:\n"
+            f"1. Assign a compliance_category: PII_contact | PII_gov_id | Financial | Health | Geographic | Internal | None\n"
+            f"2. Assign sensitivity: HIGH | MEDIUM | LOW | NONE\n"
+            f"3. List applicable_regulations — specific regulation names and article/section numbers "
+            f"   that govern this type of data. Examples:\n"
+            f"   - PII: [\"GDPR Art.4\", \"CCPA §1798.140\", \"PDPA Sec.3\"]\n"
+            f"   - Financial: [\"PCI-DSS Req.3\", \"SOX Sec.802\", \"GLBA §6801\"]\n"
+            f"   - Health: [\"HIPAA §164.514\", \"HITECH Act Sec.13402\"]\n"
+            f"   - Government ID: [\"GDPR Art.9\", \"CCPA §1798.100\"]\n"
+            f"   If no regulation applies, return an empty list.\n"
+            f"4. Write a reason explaining WHY those regulations apply to this specific column "
+            f"   (not just what the column stores — explain the compliance risk).\n\n"
+
             f"Columns:\n{cols_desc}\n\n"
             f"Return a classifications array with one entry per column."
         )
@@ -82,15 +89,16 @@ def node_classify_columns(state: SchemaMappingState) -> dict:
 
             for item in output.classifications:
                 classifications.append(SchemaColumnClassification(
-                    table_name          = table_name,
-                    column_name         = item.column_name,
-                    data_type           = next(
+                    table_name             = table_name,
+                    column_name            = item.column_name,
+                    data_type              = next(
                         (c["DATA_TYPE"] for c in columns if c["COLUMN_NAME"] == item.column_name),
                         "unknown"
                     ),
-                    compliance_category = item.compliance_category,
-                    sensitivity         = item.sensitivity,
-                    reason              = item.reason,
+                    compliance_category    = item.compliance_category,
+                    sensitivity            = item.sensitivity,
+                    applicable_regulations = item.applicable_regulations,
+                    reason                 = item.reason,
                 ))
 
         except Exception as e:

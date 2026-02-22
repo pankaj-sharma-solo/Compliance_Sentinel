@@ -14,10 +14,20 @@ from sqlalchemy import text, create_engine
 from langchain_google_genai.chat_models import ChatGoogleGenerativeAI
 from langchain_core.tools import tool
 from sentinel.config import settings
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
 _fallback_llm = ChatGoogleGenerativeAI(model=settings.cheap_model, temperature=0.0, google_api_key=settings.google_api_key)
+
+# ── Structured output schema ──────────────────────────────────────────────────
+
+class ViolationClassification(BaseModel):
+    is_violation: bool  = Field(description="Whether the column data violates the condition")
+    confidence  : float = Field(description="Confidence score between 0.0 and 1.0")
+    reasoning   : str   = Field(description="Explanation of why this is or is not a violation")
+
+_fallback_llm_structured = _fallback_llm.with_structured_output(ViolationClassification)
 
 EU_REGIONS = {
     "eu-west-1", "eu-west-2", "eu-west-3", "eu-central-1",
@@ -56,25 +66,80 @@ def check_schema_map_match(
 
 # ── Layer 2a: SQL check against information_schema ───────────────────────────
 
+class MySQLSafeQuery(BaseModel):
+    sql      : str    # rewritten MySQL-compatible SQL
+    changed  : bool   # whether any rewrite was needed
+    reason   : str    # what was changed and why (for debug/audit)
+
+_sql_rewriter = _fallback_llm.with_structured_output(MySQLSafeQuery)
+
+
+def _rewrite_for_mysql(sql: str) -> MySQLSafeQuery:
+    """
+    Ask LLM to rewrite SQL to be MySQL-compatible.
+    Called lazily — only when the first execution fails.
+    """
+    return _sql_rewriter.invoke(
+        f"Rewrite the following SQL to be fully MySQL 8.0 compatible. "
+        f"Fix any syntax issues: wrong CAST types (use SIGNED/DECIMAL/CHAR), "
+        f"PostgreSQL-specific syntax (:: casts, ILIKE), boolean literals, "
+        f"double-quoted identifiers (use backticks), Oracle functions (NVL→IFNULL). "
+        f"If no changes are needed, return the original SQL with changed=false.\n\n"
+        f"SQL:\n{sql}"
+    )
+
+
 @tool
 def run_sql_check(
-    connection_string: str, table: str, column: str, sql_template: str
+    connection_string: str,
+    table            : str,
+    column           : str,
+    sql_template     : str,
 ) -> dict:
     """
     Layer 2a — programmatic SQL check.
-    Executes the pre-decomposed sql_check_template from violation_conditions
-    against information_schema (never against user data rows).
+    Executes sql_check_template from violation_conditions against the target DB.
+    On syntax failure, rewrites via LLM and retries once.
     """
-    sql = sql_template.replace("{table}", table).replace("{column}", column)
+    sql = (
+        sql_template
+        .replace("{table}",  table).replace("{TABLE}",  table)
+        .replace("{column}", column).replace("{COLUMN}", column)
+    )
+
+    # ── Attempt 1: run as-is ──────────────────────────────────────────────────
+    result = _try_execute(connection_string, table, column, sql)
+    if result["status"] == "ok":
+        return result
+
+    # ── Attempt 2: LLM rewrite → retry once ──────────────────────────────────
+    logger.warning("SQL check failed for %s.%s — attempting LLM rewrite. Error: %s",
+                   table, column, result["error"])
+    try:
+        rewritten = _rewrite_for_mysql(sql)
+        logger.info("LLM rewrote SQL (changed=%s): %s", rewritten.changed, rewritten.reason)
+
+        if rewritten.changed:
+            retry = _try_execute(connection_string, table, column, rewritten.sql)
+            retry["sql_rewritten"] = rewritten.sql
+            retry["rewrite_reason"] = rewritten.reason
+            return retry
+
+    except Exception as e:
+        logger.warning("LLM SQL rewrite failed: %s", e)
+
+    # ── Both failed ───────────────────────────────────────────────────────────
+    return result
+
+
+def _try_execute(connection_string: str, table: str, column: str, sql: str) -> dict:
     try:
         engine = create_engine(connection_string, pool_pre_ping=True)
         with engine.connect() as conn:
-            result = conn.execute(text(sql))
-            rows = [dict(row._mapping) for row in result]
-        return {"status": "ok", "table": table, "column": column, "rows": rows}
+            rows = [dict(r._mapping) for r in conn.execute(text(sql))]
+        return {"status": "ok", "table": table, "column": column, "rows": rows, "sql": sql}
     except Exception as e:
-        logger.warning("SQL check failed for %s.%s: %s", table, column, e)
-        return {"status": "error", "table": table, "column": column, "error": str(e)}
+        return {"status": "error", "table": table, "column": column, "error": str(e), "sql": sql}
 
 
 # ── Layer 2b: Regex check on column sample values ────────────────────────────
@@ -142,7 +207,10 @@ def check_metadata_condition(
 
 @tool
 def llm_fallback_classify(
-    column_name: str, data_type: str, sample_values: list[str], condition_description: str
+    column_name          : str,
+    data_type            : str,
+    sample_values        : list[str],
+    condition_description: str,
 ) -> dict:
     """
     Layer 3 — LLM fallback. Only called when programmatic checks are inconclusive.
@@ -153,21 +221,27 @@ def llm_fallback_classify(
     prompt = (
         f"You are a compliance analyst. Given the following column information, "
         f"determine if it violates this condition: {condition_description}\n\n"
-        f"Column: {column_name}\nData Type: {data_type}\nSample Values: {samples_str}\n\n"
-        f"Return JSON: {{\"is_violation\": true/false, \"confidence\": 0.0-1.0, \"reasoning\": \"...\"}}"
+        f"Column: {column_name}\n"
+        f"Data Type: {data_type}\n"
+        f"Sample Values: {samples_str}\n\n"
+        f"Assess whether the sample values indicate a compliance violation "
+        f"of the described condition. Provide your confidence level and reasoning."
     )
     try:
-        response = _fallback_llm.invoke(prompt)
-        import json
-        parsed = json.loads(response.content)
+        # ✅ Returns ViolationClassification directly — no json.loads
+        result: ViolationClassification = _fallback_llm_structured.invoke(prompt)
         return {
-            "is_violation": parsed.get("is_violation", False),
-            "confidence": float(parsed.get("confidence", 0.0)),
-            "reasoning": parsed.get("reasoning", ""),
+            "is_violation": result.is_violation,
+            "confidence"  : round(result.confidence, 3),
+            "reasoning"   : result.reasoning,
         }
     except Exception as e:
         logger.warning("LLM fallback failed: %s", e)
-        return {"is_violation": False, "confidence": 0.0, "reasoning": f"LLM fallback error: {e}"}
+        return {
+            "is_violation": False,
+            "confidence"  : 0.0,
+            "reasoning"   : f"LLM fallback error: {e}",
+        }
 
 
 # ── Orchestration helper: full condition evaluation chain ─────────────────────
