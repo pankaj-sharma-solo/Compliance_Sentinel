@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Backgro
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from sentinel.models.audit_log import AuditLog as AuditLogModel
+from sentinel.database import SessionLocal
 
 from sentinel.database import get_db
 from sentinel.models.rule import Rule, RuleStatus
@@ -36,10 +37,12 @@ ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt"}
 
 # ── Background task: runs ingestion graph + updates job record ────────────────
 
-def _run_ingestion(pdf_path: str, source_doc: str, job_id: str, db: Session):
+# def _run_ingestion(pdf_path: str, source_doc: str, job_id: str, db: Session):
+async def _run_ingestion(pdf_path: str, source_doc: str, job_id: str):
     """
     Runs in background. Updates pdf_ingestion_jobs at each stage.
     """
+    db: Session = SessionLocal()
     job = db.query(IngestionJob).filter_by(job_id=job_id).first()
     if not job:
         logger.error("Job %s not found in DB — aborting ingestion", job_id)
@@ -51,7 +54,7 @@ def _run_ingestion(pdf_path: str, source_doc: str, job_id: str, db: Session):
         db.commit()
 
         graph = build_ingestion_graph(db)
-        result = graph.invoke({
+        result = await graph.ainvoke({
             "messages": [],
             "pdf_path": pdf_path,
             "source_doc": source_doc,
@@ -141,7 +144,8 @@ async def upload_policy_pdf(
     db.commit()
 
     # ── Queue background ingestion ────────────────────────────────────────────
-    background_tasks.add_task(_run_ingestion, pdf_path, file.filename, job_id, db)
+    # background_tasks.add_task(_run_ingestion, pdf_path, file.filename, job_id, db)
+    background_tasks.add_task(_run_ingestion, pdf_path, file.filename, job_id)
 
     return {
         "job_id"   : job_id,

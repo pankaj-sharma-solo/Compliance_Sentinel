@@ -13,6 +13,7 @@ from sentinel.models.rule import Rule, RuleStatus, ObligationType
 from sentinel.dao.rule_dao import insert_rule, reconcile_version, supersede_rule, get_rule_by_id
 from sentinel.models.audit_log import AuditLog
 from sentinel.config import settings
+import asyncio
 from datetime import date
 import logging
 
@@ -44,23 +45,54 @@ def node_extract_spans(state: IngestionState) -> dict:
         return {"errors": state.get("errors", []) + [f"Pass-2 failed: {e}"]}
 
 
-def node_decompose_rules(state: IngestionState) -> dict:
-    """Decompose each rule span into machine-checkable ViolationConditions."""
+# def node_decompose_rules(state: IngestionState) -> dict:
+#     """Decompose each rule span into machine-checkable ViolationConditions."""
+#     if not state.get("candidate_spans"):
+#         return {"errors": state.get("errors", []) + ["No spans to decompose"]}
+#
+#     decomposed = []
+#     errors = list(state.get("errors", []))
+#
+#     for span in state["candidate_spans"]:
+#         result = decompose_rule_span.invoke({"span": span})
+#         if result:
+#             try:
+#                 decomposed.append(DecomposedRule(**result))
+#             except Exception as e:
+#                 errors.append(f"DecomposedRule validation failed for {span.get('article_ref')}: {e}")
+#         else:
+#             errors.append(f"Decomposition returned None for: {span.get('article_ref', 'unknown')}")
+#
+#     logger.info("Decomposed %d/%d spans successfully", len(decomposed), len(state["candidate_spans"]))
+#     return {"decomposed_rules": decomposed, "errors": errors}
+
+async def node_decompose_rules(state: IngestionState) -> dict:
+    """Decompose each rule span into machine-checkable ViolationConditions — in parallel."""
     if not state.get("candidate_spans"):
         return {"errors": state.get("errors", []) + ["No spans to decompose"]}
 
-    decomposed = []
     errors = list(state.get("errors", []))
 
-    for span in state["candidate_spans"]:
-        result = decompose_rule_span.invoke({"span": span})
-        if result:
-            try:
-                decomposed.append(DecomposedRule(**result))
-            except Exception as e:
-                errors.append(f"DecomposedRule validation failed for {span.get('article_ref')}: {e}")
-        else:
-            errors.append(f"Decomposition returned None for: {span.get('article_ref', 'unknown')}")
+    async def decompose_one(span):
+        try:
+            result = await decompose_rule_span.ainvoke({"span": span})
+            if result:
+                return DecomposedRule(**result), None
+            else:
+                return None, f"Decomposition returned None for: {span.get('article_ref', 'unknown')}"
+        except Exception as e:
+            return None, f"DecomposedRule validation failed for {span.get('article_ref')}: {e}"
+
+    results = await asyncio.gather(
+        *[decompose_one(span) for span in state["candidate_spans"]]
+    )
+
+    decomposed = []
+    for rule, err in results:
+        if err:
+            errors.append(err)
+        elif rule:
+            decomposed.append(rule)
 
     logger.info("Decomposed %d/%d spans successfully", len(decomposed), len(state["candidate_spans"]))
     return {"decomposed_rules": decomposed, "errors": errors}
